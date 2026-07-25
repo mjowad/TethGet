@@ -93,7 +93,7 @@ async def _build_price_card(now: float) -> tuple[str | None, str]:
 
     # ساخت خطوط اصلی کارت
     card_lines = [
-        f"{stale_line}📊 **شاخص قیمت مرجع تتر (Index Price)**",
+        f"{stale_line}📊 **شاخص قیمت تتر**",
         "――――――――――――",
         f"💎 **قیمت میانگین بازار:** `{index_price:,.0f}` تومان",
         f"📊 **تغییر ۲۴ ساعته قیمت:** {formatted_change}",

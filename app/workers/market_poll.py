@@ -3,64 +3,61 @@ Background polling loops: market price ticks and RSS news checks.
 
 Extracted from main.py. These are the two long-running asyncio.Task loops
 that main.py's FastAPI lifespan spawns on startup and cancels on shutdown.
-Behavior is unchanged from the original main.py implementation.
 """
 import asyncio
 import logging
-import time
 
 from telegram.ext import Application
 
-from app import database
 from app.bot.bot_state import poller_status
 from app.config import settings
 from app.services.alarm_service import evaluate_and_trigger_alarms
-from app.services.market_service import get_market_data
+from app.services.market_service import get_market_data, record_aggregated_snapshots
+from app.services.news_service import fetch_and_process_news
 
 logger = logging.getLogger(__name__)
 
 
 async def market_poll_loop(bot_app: Application) -> None:
     """
-    چرخه اصلی پولینگ بازارهای تتر (هر ۳ ثانیه یک‌بار).
+    چرخه اصلی پولینگ هم‌زمان بازار و محاسبه قیمت مرجع (هر ۱۰ ثانیه یک‌بار).
     """
     logger.info(
         "Starting market polling loop. Poll interval: %d seconds.",
         settings.market_poll_interval
     )
-    db_write_counter = 0
 
     while True:
         start_time = asyncio.get_event_loop().time()
         try:
-            data = await get_market_data()
-            if data is not None:
-                current_price = data["price"]
+            # دریافت اطلاعات مجتمع ۴ صرافی و محاسبه قیمت مرجع (Index Price)
+            aggregated_data = await get_market_data()
+
+            if aggregated_data is not None:
+                index_price = aggregated_data["index_price"]
+                sources_count = len(aggregated_data["sources_data"])
 
                 # بروزرسانی آنی حافظه موقت (رم) برای اعتبارسنجی‌ها
-                poller_status.last_price = current_price
-                poller_status.last_source = data["source"]
+                poller_status.last_price = index_price
+                poller_status.last_source = "index_median"
                 poller_status.last_market_success = start_time
                 poller_status.last_market_error = None
 
-                # ارزیابی فوری و شلیک هشدارهای زنده مارکت در همین تیک جاری قیمت
-                await evaluate_and_trigger_alarms(current_price, data["source"], bot_app)
+                # ارزیابی فوری و شلیک هشدارهای زنده مارکت بر اساس قیمت مرجع میانگین
+                bot_token = bot_app.bot.token
+                await evaluate_and_trigger_alarms(
+                    current_price=index_price,
+                    source="شاخص مرجع میانگین بازار (Index Price)",
+                    bot_token=bot_token,
+                )
 
-                # کنترل فرکانس ذخیره‌سازی در دیتابیس (Throttling 15s)
-                db_write_counter += 1
-                if db_write_counter >= 5:
-                    await database.insert_snapshot(
-                        timestamp=int(time.time()),
-                        price=current_price,
-                        volume=data["volume"],
-                        source=data["source"],
-                        change_24h=data.get("change_24h"),
-                    )
-                    logger.info(
-                        "Recorded snapshot to DB: %.2f IRT from %s (Throttled 15s)",
-                        current_price, data["source"]
-                    )
-                    db_write_counter = 0
+                # ذخیره‌سازی مستقیم در دیتابیس همراه با هر سیکل استعلام (هر ۱۰ ثانیه)
+                await record_aggregated_snapshots(aggregated_data)
+                logger.info(
+                    "Recorded aggregated snapshots to DB: Index Price %.2f IRT from %d active sources",
+                    index_price,
+                    sources_count,
+                )
             else:
                 poller_status.last_market_error = "No valid data received from any source"
 
@@ -81,10 +78,15 @@ async def news_poll_loop() -> None:
     while True:
         start_time = asyncio.get_event_loop().time()
         try:
+            # اجرای سرویس دریافت، ارزیابی و ذخیره‌سازی اخبار
+            saved_count = await fetch_and_process_news()
+
             poller_status.last_news_success = start_time
             poller_status.last_news_error = None
+            logger.info("News poll cycle finished successfully. Saved %d new items.", saved_count)
+
         except Exception as e:
-            logger.error("Error in news polling cycle: %s", e)
+            logger.error("Error in news polling cycle: %s", e, exc_info=True)
             poller_status.last_news_error = str(e)
 
         elapsed = asyncio.get_event_loop().time() - start_time

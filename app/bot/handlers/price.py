@@ -1,8 +1,10 @@
 """
 /price command, the inline refresh button, and the shared rate limiter.
+Enhanced to display Index Price alongside active exchange sources.
 """
 import asyncio
 import logging
+import statistics
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -10,13 +12,14 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from app import database
-from app.bot.bot_state import poller_status
 from app.bot.handlers.formatting import (
-    _format_partial_value,
+    _format_24h_change_label,
+    _format_exchange_name,
     _format_tehran_hhmm,
     _is_market_price_valid,
 )
 from app.bot.handlers.keyboards import _get_price_keyboard
+from app.services.market_service import get_price_change_24h
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +47,10 @@ def _is_rate_limited(chat_id: int) -> bool:
     return False
 
 
-def _format_change(c: float) -> str:
-    if c > 0:
-        return f"🟢 +{c:.2f}٪"
-    elif c < 0:
-        return f"🔴 {c:.2f}٪"
-    return "⚪️ بدون تغییر"
-
-
-def _format_volume(v: float, source: str | None) -> str:
-    if v == 0:
-        return "—"
-    if source == "wallex":
-        return f"{v:,.0f} تومان"
-    return f"{v:,.0f}"
-
-
 async def _build_price_card(now: float) -> tuple[str | None, str]:
     try:
-        snapshots = await database.get_latest_snapshots(limit=5)
+        # دریافت تمام اسنپ‌شات‌های آخرین تیک ثبت شده
+        snapshots = await database.get_latest_tick_snapshots()
     except Exception as e:
         logger.critical("SYSTEM PARALYSIS: Database query failed! Error: %s", e)
         return None, "db_error"
@@ -71,40 +59,59 @@ async def _build_price_card(now: float) -> tuple[str | None, str]:
         logger.critical("SYSTEM PARALYSIS: Database is empty!")
         return None, "empty"
 
-    current = None
-    first_snapshot_invalid = not _is_market_price_valid(snapshots[0]["price"])
-    for snap in snapshots:
-        if _is_market_price_valid(snap["price"]):
-            current = snap
-            break
+    latest_ts = snapshots[0]["timestamp"]
+    recent_snapshots = [s for s in snapshots if _is_market_price_valid(s["price"])]
 
-    if current is None:
+    if not recent_snapshots:
         logger.critical("SYSTEM PARALYSIS: All recent snapshots in database are invalid!")
         return None, "all_invalid"
 
+    # تفکیک رکورد شاخص و صرافی‌ها
+    index_snap = next((s for s in recent_snapshots if s["source"] == "index_median"), None)
+    exchanges_snaps = [s for s in recent_snapshots if s["source"] != "index_median"]
+
+    if index_snap:
+        index_price = index_snap["price"]
+        current_ref_snap = index_snap
+    elif exchanges_snaps:
+        index_price = statistics.mean([s["price"] for s in exchanges_snaps])
+        current_ref_snap = {"timestamp": latest_ts, "price": index_price, "volume": None, "source": "index_median"}
+    else:
+        index_price = recent_snapshots[0]["price"]
+        current_ref_snap = recent_snapshots[0]
+
+    # محاسبه تغییرات ۲۴ ساعته شاخص و فرمت‌دهی با ایموجی/خط تیره
+    price_change_24h = await get_price_change_24h(current=current_ref_snap)
+    formatted_change = _format_24h_change_label(price_change_24h)
+
     stale_line = ""
-    is_stale = ((now - current["timestamp"]) > STALE_THRESHOLD_SECONDS) or first_snapshot_invalid
+    is_stale = (now - latest_ts) > STALE_THRESHOLD_SECONDS
     if is_stale:
-        stale_line = "⚠️ قیمت قدیمی‌ست٬ به‌روزرسانی جدید ناموفق بود\n\n"
+        stale_line = "⚠️ قیمت قدیمی‌ست؛ به‌روزرسانی جدید ناموفق بود\n\n"
 
-    price_label = f"{current['price']:,.0f}"
-    change_label = _format_partial_value(current["change_24h"], _format_change)
-    volume_label = _format_partial_value(
-        current["volume"], lambda v: _format_volume(v, current.get("source"))
-    )
-    source_label = _format_partial_value(current.get("source"))
-    time_label = _format_partial_value(current.get("timestamp"), _format_tehran_hhmm)
+    time_label = _format_tehran_hhmm(latest_ts)
 
-    text = (
-        f"{stale_line}"
-        "💵 نرخ لحظه‌ای تتر\n"
-        "――――――――――――\n\n"
-        f"💰 قیمت: {price_label} تومان\n"
-        f"📊 تغییر ۲۴ ساعته قیمت: {change_label}\n"
-        f"📦 حجم ۲۴ ساعته: {volume_label}\n"
-        f"🌐 منبع: {source_label}\n"
-        f"🕒 ساعت: {time_label} (به وقت تهران)"
-    )
+    # ساخت خطوط اصلی کارت
+    card_lines = [
+        f"{stale_line}📊 **شاخص قیمت تتر**",
+        "――――――――――――",
+        f"💎 **قیمت میانگین بازار:** `{index_price:,.0f}` تومان",
+        f"📊 **تغییر ۲۴ ساعته قیمت:** {formatted_change}",
+    ]
+
+    # اضافه کردن لیست صرافی‌های فعال با کاما
+    if exchanges_snaps:
+        raw_names = [_format_exchange_name(s["source"]) for s in exchanges_snaps]
+        unique_names = list(dict.fromkeys(raw_names))
+        sources_str = "، ".join(unique_names)
+        card_lines.append(f"🌐 **صرافی‌های فعال:** {sources_str}")
+
+    card_lines.extend([
+        f"🕒 **زمان بروزرسانی:** {time_label} (به وقت تهران)",
+        "",
+    ])
+
+    text = "\n".join(card_lines)
     return text, ""
 
 
@@ -116,9 +123,6 @@ _RATE_LIMIT_TEXT = (
 
 
 async def _render_price_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    منطق ساده رندر قیمت: همواره پیام جدید ارسال می‌کند و کاری با ادیت پیام‌های دیگر ندارد.
-    """
     chat_id = update.effective_chat.id
     now = time.time()
 
@@ -128,7 +132,6 @@ async def _render_price_logic(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data["price_cooldown_until"] = now + REFRESH_COOLDOWN_TIME
 
-    # حذف دکمه بروزرسانی از پیام قبلی قیمت (در صورت وجود) برای جلوگیری از کلیک‌های همزمان مکرر
     last_msg_id = context.user_data.get("last_price_message_id")
     if last_msg_id:
         try:
@@ -136,7 +139,7 @@ async def _render_price_logic(update: Update, context: ContextTypes.DEFAULT_TYPE
         except BadRequest:
             context.user_data.pop("last_price_message_id", None)
 
-    current_msg = await update.message.reply_text("⏳ در حال دریافت قیمت لحظه‌ای تتر…")
+    current_msg = await update.message.reply_text("⏳ در حال محاسبه شاخص قیمت هم‌زمان بازار…")
 
     if _is_rate_limited(chat_id):
         await current_msg.edit_text(_RATE_LIMIT_TEXT)
@@ -147,7 +150,7 @@ async def _render_price_logic(update: Update, context: ContextTypes.DEFAULT_TYPE
         await current_msg.edit_text(_FETCH_FAILURE_TEXT, reply_markup=_get_price_keyboard())
         return
 
-    new_msg = await current_msg.edit_text(text, reply_markup=_get_price_keyboard())
+    new_msg = await current_msg.edit_text(text, reply_markup=_get_price_keyboard(), parse_mode="Markdown")
     context.user_data["last_price_message_id"] = new_msg.message_id
 
 
@@ -203,7 +206,7 @@ async def handle_price_refresh(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     try:
-        new_msg = await query.edit_message_text(text, reply_markup=_get_price_keyboard())
+        new_msg = await query.edit_message_text(text, reply_markup=_get_price_keyboard(), parse_mode="Markdown")
         context.user_data["last_price_message_id"] = new_msg.message_id
     except BadRequest as e:
         if "Message is not modified" in str(e):

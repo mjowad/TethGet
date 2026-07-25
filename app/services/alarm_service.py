@@ -1,10 +1,8 @@
 """
 Alarm evaluation and trigger engine.
 
-Extracted from main.py (previously inline in the poll loop) to satisfy the
-project's own layering rule: the market-poll loop should only drive the
-tick, not contain the domain logic for what an alarm "firing" means. All
-alarm math and Telegram dispatch for triggered alarms lives here.
+Extracted from main.py to satisfy layering rules: all alarm math and Telegram
+dispatch for triggered alarms lives here.
 """
 import logging
 import time
@@ -34,9 +32,7 @@ async def evaluate_and_trigger_alarms(
     current_price: float, source: str, bot_token: str
 ) -> None:
     """
-    موتور اصلی ارزیابی و شلیک هشدارهای قیمت بر اساس سند فلو و تجربه کاربری.
-    اصلاح نهایی: جداسازی کامل سشن ارسال پیام از پولر اصلی با ایجاد کلاینت مستقل موقت
-    جهت جلوگیری از باگ مرگبار RuntimeError برای HTTPXRequest.
+    موتور اصلی ارزیابی و شلیک هشدارهای قیمت بر اساس شاخص مرجع میانه بازار.
     """
     try:
         # دریافت تمام هشدارهای فعال (حتی هشدارهایی که مسلح نیستند)
@@ -122,34 +118,27 @@ async def evaluate_and_trigger_alarms(
                 triggered_today = database.is_alarm_triggered_today(last_triggered)
 
                 if is_armed == 1:
-                    # اگر قیمت مرز را شکسته است
                     if is_condition_met:
                         if not triggered_today:
-                            # سهمیه امروز خالی است؛ مجاز به شلیک فوری
                             pass
                         else:
-                            # امروز قبلاً شلیک شده؛ خلع سلاح اتمیک جهت جلوگیری از اسپم متوالی قیمت
                             await database.update_alarm_armed_status(alarm_id, 0)
                             logger.info("Daily alarm %s broke boundary but postponed due to daily limit.", alarm_id)
                             continue
                     else:
-                        # تفنگ مسلح است اما قیمت هنوز نرسیده؛ رد کردن لوپ
                         continue
                 else:
-                    # تفنگ مسلح نیست (is_armed == 0)
-                    # اگر قیمت همچنان در کانال شکست باقی مانده ولی روز تقویمی عوض شده باشد (شلیک معوقه بامداد)
                     if is_condition_met and not triggered_today:
                         cond_str = _CONDITION_LABELS.get(condition, condition)
                         message_text = (
                             f"🌅 **گزارش روز جدید!**\n"
                             f"――――――――――――\n\n"
                             f"🎯 شرط هدف: {cond_str} {target_price:,.0f} تومان\n"
-                            f"💰 قیمت فعلی بازار: {current_price:,.0f} تومان\n"
-                            f"🌐 منبع قیمت: {source}\n\n"
+                            f"💰 قیمت فعلی شاخص بازار: {current_price:,.0f} تومان\n"
+                            f"🌐 مرجع قیمت: {source}\n\n"
                             f"🔁 تناوب هشدار: روزی یک‌بار (گزارش ماندگاری در ناحیه شکست)"
                         )
                         try:
-                            # ساخت کلاینت مستقل اتمیک موقت مخصوص تسک پس‌زمینه
                             local_bot = ExtBot(token=bot_token)
                             async with local_bot:
                                 await local_bot.send_message(chat_id=chat_id, text=message_text, parse_mode="Markdown")
@@ -159,7 +148,6 @@ async def evaluate_and_trigger_alarms(
                             logger.error("Failed to send postponed daily alert: %s", tg_err)
                         continue
                     else:
-                        # قیمت یا برگشته که در لایه اول مسلح می‌شود، یا امروز شلیک شده و قیمت هنوز بالای مرز است
                         continue
 
             # منطق سایر فرکانس‌ها (every_time, once)
@@ -183,8 +171,8 @@ async def evaluate_and_trigger_alarms(
                 f"🔔 **هشدار قیمت تتر محقق شد!**\n"
                 f"――――――――――――\n\n"
                 f"🎯 شرط هدف: {cond_str} {target_price:,.0f} تومان\n"
-                f"💰 قیمت فعلی بازار: {current_price:,.0f} تومان\n"
-                f"🌐 منبع قیمت: {source}\n\n"
+                f"💰 قیمت فعلی شاخص بازار: {current_price:,.0f} تومان\n"
+                f"🌐 مرجع قیمت: {source}\n\n"
             )
 
             if frequency == "once":
@@ -193,7 +181,6 @@ async def evaluate_and_trigger_alarms(
                 message_text += f"🔁 تناوب هشدار: {frequency == 'daily' and 'روزی یک‌بار' or 'هر بار (با رعایت نوسان)'}"
 
             try:
-                # ساخت کلاینت مستقل اتمیک موقت مخصوص تسک پس‌زمینه برای عدم تداخل با سشن اصلی
                 local_bot = ExtBot(token=bot_token)
                 async with local_bot:
                     await local_bot.send_message(
@@ -206,7 +193,6 @@ async def evaluate_and_trigger_alarms(
                 if frequency == "once":
                     await database.deactivate_alarm(alarm_id)
                 else:
-                    # ثبت زمان شلیک و سلب وضعیت مسلح (نامسلح کردن تا بازگشت بعدی قیمت)
                     await database.update_alarm_triggered_at(alarm_id, int(now), is_armed=0)
 
             except Exception as tg_err:

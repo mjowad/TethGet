@@ -1,5 +1,5 @@
 """
-Environment configuration and static priority/keyword tables.
+Environment configuration and static tables.
 
 Loaded once at import time. Keep this module free of any I/O beyond
 reading environment variables — no network calls, no DB access — so it
@@ -33,27 +33,28 @@ class Settings:
     # --- Database ---
     database_path: str = os.getenv("DATABASE_PATH", "./tether_tracker.db")
 
-    # --- Market data sources ---
+    # --- Market Data Sources (Active 4 Exchangers for Concurrent Index Price) ---
     wallex_api_url: str = os.getenv("WALLEX_API_URL", "https://api.wallex.ir/v1/markets")
     bitpin_api_url: str = os.getenv("BITPIN_API_URL", "https://api.bitpin.ir/v1/mkt/markets/")
-    tetherland_api_url: str = os.getenv("TETHERLAND_API_URL", "https://api.tetherland.com/currencies")
+    exir_api_url: str = os.getenv("EXIR_API_URL", "https://api.exir.io/v2/ticker?symbol=usdt-irt")
+    zipodo_api_url: str = os.getenv("ZIPODO_API_URL", "https://api.zipodo.ir/usdt/")
 
-    # --- Polling intervals (seconds) ---
-    market_poll_interval: int = _env_int("MARKET_POLL_INTERVAL", 3)
+    # --- Active market sources list ---
+    active_market_sources: tuple = field(
+        default_factory=lambda: ("wallex", "bitpin", "exir", "zipodo")
+    )
+
+    # --- Polling & Cooldown intervals (seconds) ---
+    market_poll_interval: int = _env_int("MARKET_POLL_INTERVAL", 10)
+    market_cooldown_seconds: int = _env_int("MARKET_COOLDOWN_SECONDS", 18000)  # Default: 5 hours
     rss_poll_interval: int = _env_int("RSS_POLL_INTERVAL", 300)
 
     # --- Misc ---
     env: str = os.getenv("ENV", "development")
 
-    # --- Market failover priority chain (Bitpin set as Primary) ---
-    market_source_priority: tuple = field(
-        default_factory=lambda: ("bitpin", "wallex", "tetherland")
-    )
-
-    # --- RSS source priority chain (اقتصادی، رمزپایه و سیاسی) ---
+    # --- RSS source priority chain ---
     rss_source_priority: tuple = field(
         default_factory=lambda: (
-            # --- اخبار اقتصادی و کریپتو ---
             {
                 "slug": "irna_macro",
                 "name": "ایرنا (اقتصاد کلان)",
@@ -94,7 +95,6 @@ class Settings:
                 "name": "ارز دیجیتال",
                 "url": "https://arzdigital.com/breaking/feed/",
             },
-            # --- اخبار سیاسی و بین‌الملل ---
             {
                 "slug": "irna_defense",
                 "name": "ایرنا (دفاعی امنیتی)",

@@ -1,18 +1,17 @@
+"""
+Main entry point for FastAPI application, lifespan context, and background task management.
+"""
 import asyncio
 import logging
 import sys
-import time
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 
 from app import database
-from app.bot.bot_state import poller_status
 from app.bot.handlers import build_application
-from app.config import settings
-from app.services.market_service import get_market_data
-from app.services.alarm_service import evaluate_and_trigger_alarms
-from app.services.news_service import fetch_and_process_news
+from app.workers.market_poll import market_poll_loop, news_poll_loop
 
 # تنظیم لایه لاگر پروژه
 logging.basicConfig(
@@ -25,94 +24,29 @@ logger = logging.getLogger(__name__)
 # وهله‌سازی از ربات تلگرام بر اساس ساختار استاندارد PTB
 bot_app = build_application()
 
-
-async def _market_poll_loop():
-    """
-    چرخه اصلی پولینگ بازارهای تتر (هر ۳ ثانیه یک‌بار).
-    """
-    logger.info(
-        "Starting market polling loop. Poll interval: %d seconds.",
-        settings.market_poll_interval
-    )
-    db_write_counter = 0
-
-    while True:
-        start_time = asyncio.get_event_loop().time()
-        try:
-            data = await get_market_data()
-            if data is not None:
-                current_price = data["price"]
-
-                # بروزرسانی آنی حافظه موقت (رم) برای اعتبارسنجی‌ها
-                poller_status.last_price = current_price
-                poller_status.last_source = data["source"]
-                poller_status.last_market_success = start_time
-                poller_status.last_market_error = None
-
-                # پاس دادن توکن ربات به موتور ارزیابی برای شلیک مستقل و اتمیک
-                await evaluate_and_trigger_alarms(current_price, data["source"], settings.telegram_bot_token)
-
-                # کنترل فرکانس ذخیره‌سازی در دیتابیس (Throttling 15s)
-                db_write_counter += 1
-                if db_write_counter >= 5:
-                    await database.insert_snapshot(
-                        timestamp=int(time.time()),
-                        price=current_price,
-                        volume=data["volume"],
-                        source=data["source"],
-                        change_24h=data.get("change_24h"),
-                    )
-                    logger.info(
-                        "Recorded snapshot to DB: %.2f IRT from %s (Throttled 15s)",
-                        current_price, data["source"]
-                    )
-                    db_write_counter = 0
-            else:
-                poller_status.last_market_error = "No valid data received from any source"
-
-        except Exception as e:
-            logger.error("Error in market polling cycle: %s", e, exc_info=True)
-            poller_status.last_market_error = str(e)
-
-        elapsed = asyncio.get_event_loop().time() - start_time
-        sleep_time = max(0.1, settings.market_poll_interval - elapsed)
-        await asyncio.sleep(sleep_time)
-
-
-async def _news_poll_loop():
-    """
-    چرخه بررسی اخبار روز تتر و ذخیره در دیتابیس با موتور Scoring.
-    """
-    logger.info("Starting news polling loop. Poll interval: %d seconds.", settings.rss_poll_interval)
-    while True:
-        start_time = asyncio.get_event_loop().time()
-        try:
-            saved_count = await fetch_and_process_news()
-            poller_status.last_news_success = start_time
-            poller_status.last_news_error = None
-            if saved_count > 0:
-                logger.info("News poll completed: Saved %d new high-impact items.", saved_count)
-        except Exception as e:
-            logger.error("Error in news polling cycle: %s", e, exc_info=True)
-            poller_status.last_news_error = str(e)
-
-        elapsed = asyncio.get_event_loop().time() - start_time
-        sleep_time = max(1.0, settings.rss_poll_interval - elapsed)
-        await asyncio.sleep(sleep_time)
+# Global HTTP client session shared across the lifespan
+http_client: httpx.AsyncClient | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    مدیریت طول عمر برنامه FastAPI و شروع/خاتمه کار پروسه‌های پس‌زمینه با پولینگ مستقیم تلگرام.
+    مدیریت طول عمر برنامه FastAPI، کلاینت یکپارچه HTTP و پروسه‌های پس‌زمینه.
     """
-    # مقداردهی اولیه به کلاینت دیتابیس
+    global http_client
+
+    # ۱. مقداردهی اولیه به کلاینت دیتابیس
     await database.init_db()
 
-    # شروع به کار ربات در حالت Polling مخصوص تست لوکال و سرور
+    # ۲. ایجاد کلاینت یکپارچه HTTP برای شبکه
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(10.0),
+        follow_redirects=True,
+    )
+
+    # ۳. شروع به کار ربات تلگرام (Polling Mode)
     await bot_app.initialize()
 
-    # موتور زمان‌بندی جاب‌کیو در استارت‌آپ
     if bot_app.job_queue:
         logger.info("🚀 JobQueue initialized successfully. Starting the queue...")
         await bot_app.job_queue.start()
@@ -123,13 +57,13 @@ async def lifespan(app: FastAPI):
     await bot_app.start()
     logger.info("Telegram bot initialized and started via POLLING mode safely.")
 
-    # ثبت تسک‌های پس‌زمینه
-    market_task = asyncio.create_task(_market_poll_loop())
-    news_task = asyncio.create_task(_news_poll_loop())
+    # ۴. ثبت و اجرای تسک‌های پس‌زمینه ورکرها
+    market_task = asyncio.create_task(market_poll_loop(bot_app))
+    news_task = asyncio.create_task(news_poll_loop())
 
     yield
 
-    # فرآیند اتمام کار تسک‌ها هنگام خاموش شدن سرور
+    # ۵. فرآیند اتمام کار تسک‌ها هنگام خاموش شدن سرور
     market_task.cancel()
     news_task.cancel()
     try:
@@ -137,16 +71,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Error while canceling background polling tasks: %s", e)
 
-    # اتمام کار ربات تلگرام
+    # ۶. اتمام کار ربات تلگرام
     await bot_app.updater.stop()
     await bot_app.stop()
 
-    # استاپ اصولی موتور زمان‌بندی جاب‌کیو در تِردون
     if bot_app.job_queue:
         await bot_app.job_queue.stop()
 
     await bot_app.shutdown()
-    logger.info("Telegram bot stopped cleanly.")
+
+    # ۷. بستن تمیز کلاینت شبکه HTTP
+    if http_client is not None:
+        await http_client.aclose()
+
+    await database.close_db()
+    logger.info("Application and resources stopped cleanly.")
 
 
 app = FastAPI(lifespan=lifespan)

@@ -6,7 +6,6 @@ that main.py's FastAPI lifespan spawns on startup and cancels on shutdown.
 """
 import asyncio
 import logging
-import time
 
 from telegram.ext import Application
 
@@ -14,6 +13,7 @@ from app.bot.bot_state import poller_status
 from app.config import settings
 from app.services.alarm_service import evaluate_and_trigger_alarms
 from app.services.market_service import get_market_data, record_aggregated_snapshots
+from app.services.news_service import fetch_and_process_news
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +78,15 @@ async def news_poll_loop() -> None:
     while True:
         start_time = asyncio.get_event_loop().time()
         try:
+            # اجرای سرویس دریافت، ارزیابی و ذخیره‌سازی اخبار
+            saved_count = await fetch_and_process_news()
+
             poller_status.last_news_success = start_time
             poller_status.last_news_error = None
+            logger.info("News poll cycle finished successfully. Saved %d new items.", saved_count)
+
         except Exception as e:
-            logger.error("Error in news polling cycle: %s", e)
+            logger.error("Error in news polling cycle: %s", e, exc_info=True)
             poller_status.last_news_error = str(e)
 
         elapsed = asyncio.get_event_loop().time() - start_time

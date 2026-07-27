@@ -47,7 +47,7 @@ async def market_poll_loop(bot_app: Application) -> None:
                 bot_token = bot_app.bot.token
                 await evaluate_and_trigger_alarms(
                     current_price=index_price,
-                    source="شاخص مرجع میانگین بازار (Index Price)",
+                    source="شاخص قیمت تتر",
                     bot_token=bot_token,
                 )
 

@@ -30,7 +30,7 @@ _EXCHANGE_NAMES_FA = {
     "bitpin": "بیت‌پین",
     "exir": "اکسیر",
     "zipodo": "اومپی فینکس",
-    "index_median": "شاخص قیمت بازار",
+    "index_median": "شاخص قیمت تتر",
 }
 
 _DIGIT_TRANSLATION = str.maketrans(

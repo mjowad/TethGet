@@ -73,7 +73,7 @@ async def handle_alarm_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("🏠 منوی اصلی", callback_data=NAV_MAIN_MENU_CALLBACK)],
         ])
         sent_msg = await update.message.reply_text(
-            "⚠️ شما به سقف ۳ هشدار فعال رسیده‌اید.\n"
+            "⚠️ شما به سقف ۱۰  هشدار فعال رسیده‌اید.\n"
             "برای ساخت هشدار جدید, ابتدا یکی از هشدارهای قبلی را حذف کنید.",
             reply_markup=keyboard,
         )
@@ -360,7 +360,7 @@ async def handle_alarm_frequency(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("🏠 منوی اصلی", callback_data=NAV_MAIN_MENU_CALLBACK)],
         ])
         await query.edit_message_text(
-            "⚠️ **در همین حین به سقف ۳ هشدار فعال رسیده‌اید!**\n\n"
+            "⚠️ **در همین حین به سقف ۱۰ هشدار فعال رسیده‌اید!**\n\n"
             "این هشدار ذخیره نشد. برای ثبت هشدار جدید، لطفاً ابتدا یکی از هشدارهای قبلی خود را حذف کنید.",
             reply_markup=keyboard
         )
